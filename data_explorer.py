@@ -353,7 +353,8 @@ def generate_points(audio_dir=None, data_csv=None, audio_list=None, feature='xve
         out.append(projected[:,2])
     out.append(wavs)
     #Ver como dar posibilidad de poner label:
-    out.append(None)
+    labels = [Path(f).parent for f in wavs]
+    out.append(labels)
     return tuple(out)
 
 if __name__ == '__main__':
