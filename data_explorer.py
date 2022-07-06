@@ -25,12 +25,13 @@ import glob
 import matplotlib.cm as cm
 from pathlib import Path
 from tqdm import tqdm
-import joblib
 
 from shapely.geometry import Point
 from shapely.geometry.polygon import Polygon
 
 from sklearn.neighbors import NearestNeighbors
+
+import argparse
 
 class PickableGLViewWidget(GLViewWidget):
     pickedPoint = pyqtSignal(int)
@@ -168,7 +169,7 @@ class Window(QMainWindow):
             
             self.scatter = GLScatterPlotItem(size=10, color=(255, 255, 255, 120))
             self.scatter.setData(pos = self.pos,
-                            color = np.array([[c.color().red()/255.,c.color().green()/255.,c.color().blue()/255.,0.7] for c in self.cs]))
+                            color = np.array([[c.color().red()/255.,c.color().green()/255.,c.color().blue()/255.,0.3] for c in self.cs]))
             self.plot.addItem(GLGridItem())
             self.plot.addItem(GLAxisItem())
         self.plot.addItem(self.scatter)
@@ -215,11 +216,18 @@ class Window(QMainWindow):
         self.scatter.setData(pos=self.pos, color=color)
 
     def save_selection(self):
-        with open('export.txt','w') as f:
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        fileName, _ = QFileDialog.getSaveFileName(self,"QFileDialog.getSaveFileName()","","All Files (*);;Text Files (*.txt)", options=options)
+        with open(fileName,'w') as f:
             for s, d in zip(self.is_selected, self.audios):
                 if s:
                     f.write('{}\n'.format(d))
-
+        self.cs = self.cs[~self.is_selected]
+        self.s = self.s[~self.is_selected]
+        self.audios = self.audios[~self.is_selected]
+        self.is_selected = [0]*len(self.audios)
+        
     def onPoints3DClicked(self, idx):
         if idx < len(self.pos):
             if self.audios[idx] is not None:
@@ -230,7 +238,7 @@ class Window(QMainWindow):
                     unnormalized_position = self.pos[idx]
                 self.text_data.setText(' Filename: {}\n Position: {}'.format(self.audios[idx],unnormalized_position))
                 self.text_data.adjustSize()
-            symbolBrushs = np.array([[c.color().red()/255.,c.color().green()/255.,c.color().blue()/255.,0.7] for c in self.cs])
+            symbolBrushs = np.array([[c.color().red()/255.,c.color().green()/255.,c.color().blue()/255.,0.3] for c in self.cs])
             self.new_point_color = copy.deepcopy(symbolBrushs[idx])
             symbolBrushs[idx] = [255, 0, 0, 255]
             if (self.last_point is not None) and (self.last_point != idx):
@@ -291,33 +299,75 @@ class Window(QMainWindow):
             poly.append(p_i)
         
         self.filter.m_overlay.polygon = poly
-        #from IPython import embed; embed()
-
-        #self.filter.m_overlay.polygon = QPolygon.fromList(self.polygon_points)
 
     def playAudio(self,filename):
         x,fs = sf.read(filename)
         sd.play(x, fs)
 
-data = joblib.load('/home/lpepino/auto_dataset/embeddings.pkl')
-audios = list(data.keys())
-vectors = list(data.values())
-vectors = np.stack(vectors)
-vectors = (vectors-np.mean(vectors,axis=0))/np.std(vectors,axis=0)
+def generate_window(x,y,z,filenames,labels):
+    colormap = cm.gist_rainbow
+    if labels is None:
+        labels = ['default']*len(x)
 
-N_COMPONENTS = 3
-print('Projecting to {}D'.format(N_COMPONENTS))
-model = umap.UMAP(n_components=N_COMPONENTS)
-embedding = model.fit_transform(vectors)
+    cs_per_label = {x:[c*255 for c in colormap(int((i*colormap.N)/len(np.unique(labels))))[:3]] for i,x in enumerate(np.unique(labels))}
+    cs = [cs_per_label[x] for x in labels]
 
-labels = [0]*len(audios)
-colormap = cm.tab20
-cs_per_label = command_color = {x:[c*255 for c in colormap(int((i*colormap.N)/len(np.unique(labels))))[:3]] for i,x in enumerate(np.unique(labels))}
-cs = [cs_per_label[x] for x in labels]
-App = QApplication(sys.argv)
-if N_COMPONENTS == 3:
-    window = Window(embedding[:,0],embedding[:,1],embedding[:,2],c=cs,audios=audios)
-else:
-    window = Window(embedding[:,0],embedding[:,1],c=cs,audios=audios)
+    App = QApplication(sys.argv)
+    window = Window(x,y,z,c=cs,audios=filenames)
 
-sys.exit(App.exec())
+    sys.exit(App.exec())
+
+def generate_points(audio_dir=None, data_csv=None, audio_list=None, feature='xvector', projector='umap', disable_feature_normalization=False, d=3):
+    print('Loading audios')
+    if data_csv is not None:
+        import pandas as pd
+        df = pd.read_csv(data_csv)
+        out = [df['x'].values, df['y'].values]
+        if 'z' in df.columns:
+            out.append(df['z'].values)
+        else:
+            out.append(None)
+        out.append(df['filename'].values)
+        if 'label' in df.columns:
+            out.append(df['label'].values)
+        return tuple(out)
+    if audio_dir is not None:
+        wavs = list(Path(audio_dir).rglob('*.wav'))
+    elif audio_list is not None:
+        with open(audio_list,'r') as f:
+            wavs = f.read().splitlines()
+
+    from feature_extractors import feature_extractors
+    from projectors import projectors
+
+    print('Extracting features')
+    features = feature_extractors[feature](wavs)
+    features = np.stack(features)
+    if not disable_feature_normalization:
+        features = (features-np.mean(features,axis=0))/np.std(features,axis=0)
+    print('Projecting to {}D'.format(d))
+    projected = projectors[projector](features)
+
+    out = [projected[:,0], projected[:,1]]
+    if projected.shape[1] == 3:
+        out.append(projected[:,2])
+    out.append(wavs)
+    #Ver como dar posibilidad de poner label:
+    out.append(None)
+    return tuple(out)
+
+if __name__ == '__main__':
+    argparser = argparse.ArgumentParser(description='Run pipeline from configs')
+    argparser.add_argument('--audio_dir', type=str,
+                           help='Directory with audios to visualize', default=None)
+    argparser.add_argument('--data_csv', type=str, help='csv file with data already processed. Expects columns x,y,z, filename and optionally label', default=None)
+    argparser.add_argument('--audio_list', type=str, help='file with list of audio filenames to visualize', default=None)
+    argparser.add_argument('--feature', type=str, help="Feature to extract from audios. It can be 'mfcc' or 'xvector'", default='xvector')
+    argparser.add_argument('--projector', type=str, help="Method to reduce dimensionality. It can be 'umap', 'tsne', 'pca', 'pacmap'. Default: umap", default='umap')
+    argparser.add_argument('--d', type=int, help='Dimensionality of visualition. Default: 3', default=3)
+    argparser.add_argument('--disable_feature_normalization',action='store_true', default=False, help='Disable feature normalization')
+    args = vars(argparser.parse_args())
+
+    x,y,z,filenames,c = generate_points(**args)
+    print('Launching GUI')
+    generate_window(x,y,z,filenames,c)
